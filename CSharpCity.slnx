@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CSharpCity.Analysis/CSharpCity.Analysis.csproj" />
+    <Project Path="src/CSharpCity.App/CSharpCity.App.csproj" />
+    <Project Path="src/CSharpCity.Layout/CSharpCity.Layout.csproj" />
+    <Project Path="src/CSharpCity.Model/CSharpCity.Model.csproj" />
+    <Project Path="src/CSharpCity.Render/CSharpCity.Render.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CSharpCity.Layout.Tests/CSharpCity.Layout.Tests.csproj" />
+  </Folder>
+</Solution>

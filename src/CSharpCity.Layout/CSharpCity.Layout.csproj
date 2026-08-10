@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <!-- The invariants worth testing (cut emission, route connectivity, namespace folding) live on
+         internal types; exposing them publicly just for tests would be worse. -->
+    <InternalsVisibleTo Include="CSharpCity.Layout.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CSharpCity.Model\CSharpCity.Model.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

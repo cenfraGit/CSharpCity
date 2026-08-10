@@ -1,0 +1,47 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <!-- Parsing a git log and mapping Roslyn's absolute paths onto its relative ones are the two
+         places this assembly can be wrong without anything noticing, and both are internal. -->
+    <InternalsVisibleTo Include="CSharpCity.Layout.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CSharpCity.Model\CSharpCity.Model.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.11.2" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.6.0" />
+    <!--
+      MSBuildLocator resolves the real MSBuild assemblies from the installed SDK at runtime.
+      Shipping our own copies alongside it causes assembly-load conflicts, so reference them
+      compile-time only. Without this the build fails outright with MSBL001.
+    -->
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.11.48" ExcludeAssets="runtime" PrivateAssets="all" />
+    <!--
+      Sonar's rules are for the solution we analyze, not for this project. ExcludeAssets="all" stops
+      them being applied to our own build; GeneratePathProperty exposes the package location so the
+      analyzer DLLs can be copied out and loaded at runtime instead.
+    -->
+    <PackageReference Include="SonarAnalyzer.CSharp" Version="10.31.0.145097"
+                      GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Ship the rule assemblies beside the app so they can be loaded against a target compilation. -->
+  <ItemGroup>
+    <!-- This package ships one merged assembly directly under analyzers/, not the usual
+         analyzers/dotnet/cs/ layout, so the glob is deliberately shallow. -->
+    <None Include="$(PkgSonarAnalyzer_CSharp)\analyzers\*.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="analyzers\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
