@@ -181,6 +181,30 @@ public sealed class MethodNode
     public bool IsAsync { get; set; }
     public int Complexity { get; set; }
     public int MaxNesting { get; set; }
+
+    // --- source span: where this method sits in its file ---
+
+    /// <summary>
+    /// First and last line of the declaration, 1-based, or 0 when unknown.
+    /// </summary>
+    /// <remarks>
+    /// The only identity a method has. There is no id and no signature here, so overloads are
+    /// indistinguishable by name alone — which makes a line span the one thing that can join a
+    /// method to an external report keyed on file and line, as every coverage format is.
+    /// </remarks>
+    public int StartLine { get; set; }
+    public int EndLine { get; set; }
+
+    /// <summary>
+    /// Fraction of this method's statements a test run reached, 0..1, or <b>-1 when unknown</b>.
+    /// </summary>
+    /// <remarks>
+    /// The sentinel matters as much as the value. Zero means "measured, and nothing ran it", which
+    /// is a real finding worth showing; -1 means "nobody measured", which is not. Rendering the two
+    /// the same way would put damp on every floor of every building whenever a coverage report was
+    /// simply not supplied, and the city would look untested rather than unmeasured.
+    /// </remarks>
+    public double Coverage { get; set; } = -1;
 }
 
 public enum SmellKind

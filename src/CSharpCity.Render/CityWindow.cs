@@ -1,8 +1,10 @@
 using System.Numerics;
 using CSharpCity.Layout;
+using CSharpCity.Model;
 using Silk.NET.Input;
 using Silk.NET.Maths;
 using Silk.NET.OpenGL;
+using Silk.NET.OpenGL.Extensions.ImGui;
 using Silk.NET.Windowing;
 
 namespace CSharpCity.Render;
@@ -75,7 +77,8 @@ public sealed class CityWindow : IDisposable
     /// between two buildings reads fine without the worn ground under it.
     /// </summary>
     CityLayer _layers = CityLayer.Walkers | CityLayer.Roundabouts
-                        | CityLayer.Highways | CityLayer.Air | CityLayer.Sidewalks;
+                        | CityLayer.Highways | CityLayer.Air | CityLayer.Sidewalks
+                        | CityLayer.Works | CityLayer.Backlog;
     Camera _camera = null!;
     bool _labelsVisible = true;
 
@@ -86,10 +89,19 @@ public sealed class CityWindow : IDisposable
     bool _nightTarget;
     int _hoveredPickId = -1;
 
-    public CityWindow(SceneGraph scene, string title)
+    // --- the works overlay, and the one ImGui panel in the application ---
+    readonly WorksFeed? _feed;
+    readonly WorksBrowser _browser = new();
+    ImGuiController? _imgui;
+    bool _browserOpen;
+    /// <summary>Set off the render thread by a finished fetch; drained at the top of the next frame.</summary>
+    GitHubSnapshot? _pendingSnapshot;
+
+    public CityWindow(SceneGraph scene, string title, WorksFeed? feed = null)
     {
         _scene = scene;
         _title = title;
+        _feed = feed;
     }
 
     public void Run()
@@ -170,6 +182,11 @@ public sealed class CityWindow : IDisposable
         _camera = new Camera { Position = _scene.SpawnPosition, Yaw = _scene.SpawnYaw };
 
         _input = _window.CreateInput();
+
+        // ImGui's controller subscribes to the same input context and brings the mouse buttons the
+        // rest of the application has never needed. Created only when there is a remote to browse,
+        // so a run with no gh pays nothing for it.
+        if (_feed is not null) _imgui = new ImGuiController(_gl, _window, _input);
         foreach (var keyboard in _input.Keyboards)
         {
             keyboard.KeyDown += OnKeyDown;
@@ -209,10 +226,13 @@ public sealed class CityWindow : IDisposable
         // Bedrock, well below everything. The terrain mesh is the visible ground now; this only
         // backstops the view past the mountains, so it sits far enough down to never compete for
         // depth with anything you can actually see.
+        // Always below the deepest ground, never at a fixed depth. Once the terrain could dip below
+        // sea level a fixed slab came up through the water and greyed out every channel.
         var b = _scene.CityBounds;
+        float bedrockTop = MathF.Min(-3f, _scene.LowestGround - 4f);
         instances.Add(new BoxRenderer.Instance
         {
-            BasePosition = new Vector3(b.CenterX, -9f, b.CenterZ),
+            BasePosition = new Vector3(b.CenterX, bedrockTop - 6f, b.CenterZ),
             Size = new Vector3(MathF.Max(b.Width, 200f) * 3f, 6f, MathF.Max(b.Depth, 200f) * 3f),
             Color = new Vector4(0.14f, 0.15f, 0.16f, 1f),
             Flags = 0,
@@ -335,6 +355,15 @@ public sealed class CityWindow : IDisposable
 
     void OnKeyDown(IKeyboard keyboard, Key key, int _)
     {
+        // The browser takes the keyboard for the same reason the picker does: ImGui receives input
+        // through its own subscription, so without this a filter being typed into the panel would
+        // also be toggling layers and flying the camera across the city.
+        if (_browserOpen)
+        {
+            if (key == Key.Escape) ToggleBrowser();
+            return;
+        }
+
         // While the picker is open it takes every key. Otherwise typing a building's name would
         // toggle labels, launch the tour and fly the camera off across the city.
         if (_pickerOpen)
@@ -373,10 +402,15 @@ public sealed class CityWindow : IDisposable
         switch (key)
         {
             case Key.Escape:
-                _mouseCaptured = !_mouseCaptured;
-                foreach (var mouse in _input.Mice)
-                    mouse.Cursor.CursorMode = _mouseCaptured ? CursorMode.Raw : CursorMode.Normal;
-                _firstMouse = true;
+                CaptureMouse(!_mouseCaptured);
+                break;
+
+            case Key.G:
+                ToggleBrowser();
+                break;
+
+            case Key.F12:
+                RequestRefresh();
                 break;
             case Key.F:
                 _camera.ToggleFly();
@@ -426,6 +460,11 @@ public sealed class CityWindow : IDisposable
             case Key.F7: ToggleLayer(CityLayer.Air); break;
             case Key.F9: ToggleLayer(CityLayer.Walkers); break;
             case Key.F10: ToggleLayer(CityLayer.Sidewalks); break;
+
+            // The overlay's two layers. On letters rather than function keys because F1-F11 are
+            // fully spoken for, and these two are adjacent so they read as a pair.
+            case Key.O: ToggleLayer(CityLayer.Works); break;
+            case Key.P: ToggleLayer(CityLayer.Backlog); break;
             case Key.Equal or Key.KeypadAdd:
                 // Sub-stepped inside the simulation, so speeding up is more ticks and never a
                 // bigger one — the car-following stays stable at any scale.
@@ -765,8 +804,8 @@ public sealed class CityWindow : IDisposable
         _roads.Upload(_scene.Roads, _layers);
 
         // Boxes are chunked and uploaded once at startup, so a layer that has any boxes in it
-        // means rebuilding that buffer. Only the sidewalks do, and only on a keypress.
-        if (layer == CityLayer.Sidewalks)
+        // means rebuilding that buffer. Only these do, and only on a keypress.
+        if (layer is CityLayer.Sidewalks or CityLayer.Works or CityLayer.Backlog)
         {
             var instances = BuildInstances();
             _totalInstances = instances.Length;
@@ -805,7 +844,33 @@ public sealed class CityWindow : IDisposable
         _elapsed += deltaTime;
         var keyboard = _input.Keyboards[0];
 
+        // A finished fetch is applied here, on the render thread, where the scene and the GL buffers
+        // can safely be touched.
+        if (_pendingSnapshot is { } fresh && _feed is not null)
+        {
+            _pendingSnapshot = null;
+            _feed.Snapshot = fresh;
+            _feed.Refreshing = false;
+            _feed.LastError = fresh.Available ? null : fresh.Reason;
+            ApplyOverlay();
+
+            ShowCaption(fresh.Available ? "Works refreshed" : "Refresh failed",
+                fresh.Available
+                    ? $"{fresh.PullRequests.Count} open pull request(s), {fresh.Issues.Count} issue(s)"
+                    : fresh.Reason ?? "");
+        }
+
         var move = Vector3.Zero;
+        // Nothing the keyboard or mouse does moves the camera while the browser has them.
+        if (_browserOpen)
+        {
+            _sim.Step(dt);
+            _night += Math.Clamp((_nightTarget ? 1f : 0f) - _night, -dt * 2f, dt * 2f);
+            _captionSeconds += deltaTime;
+            ReportPerformance(deltaTime);
+            return;
+        }
+
         // Nothing the keyboard does moves the camera while a name is being typed into it.
         if (_pickerOpen)
         {
@@ -821,7 +886,7 @@ public sealed class CityWindow : IDisposable
         if (keyboard.IsKeyPressed(Key.D)) move.X += 1;
         if (keyboard.IsKeyPressed(Key.A)) move.X -= 1;
         if (keyboard.IsKeyPressed(Key.Space)) move.Y += 1;
-        if (keyboard.IsKeyPressed(Key.ControlLeft)) move.Y -= 1;
+        if (Held(keyboard, Key.ControlLeft, Key.ControlRight)) move.Y -= 1;
 
         // Any movement input cancels the tour or the ride: you're never trapped in a cutscene.
         if (move != Vector3.Zero)
@@ -836,7 +901,8 @@ public sealed class CityWindow : IDisposable
 
         AdvanceFlight(deltaTime);
         AdvanceRide(deltaTime);
-        if (!_inFlight && !_riding) _camera.Move(move, dt, keyboard.IsKeyPressed(Key.ShiftLeft));
+        if (!_inFlight && !_riding)
+            _camera.Move(move, dt, Held(keyboard, Key.ShiftLeft, Key.ShiftRight));
         _captionSeconds += deltaTime;
 
         // Ease between day and night rather than snapping.
@@ -969,6 +1035,126 @@ public sealed class CityWindow : IDisposable
         // crisp and doesn't glow.
         _post.Resolve();
         DrawHud();
+        DrawBrowser(deltaTime);
+    }
+
+    /// <summary>
+    /// Whether either of a modifier's two keys is down.
+    /// </summary>
+    /// <remarks>
+    /// Only the left-hand key of each pair was ever read, which made Shift and Ctrl silently
+    /// half-broken: whether sprinting worked depended on which side of the keyboard your hand
+    /// happened to be on. It shows up worst when descending fast, because holding Ctrl with the
+    /// left hand and reaching for Shift naturally puts you on the right-hand one.
+    /// </remarks>
+    static bool Held(IKeyboard keyboard, Key left, Key right) =>
+        keyboard.IsKeyPressed(left) || keyboard.IsKeyPressed(right);
+
+    void CaptureMouse(bool captured)
+    {
+        _mouseCaptured = captured;
+        foreach (var mouse in _input.Mice)
+            mouse.Cursor.CursorMode = captured ? CursorMode.Raw : CursorMode.Normal;
+        _firstMouse = true;
+    }
+
+    /// <summary>Opens or closes the works browser, handing the mouse over and taking it back.</summary>
+    void ToggleBrowser()
+    {
+        if (_feed is null)
+        {
+            ShowCaption("No remote", "run inside a GitHub repository with gh installed");
+            return;
+        }
+
+        _browserOpen = !_browserOpen;
+        CaptureMouse(!_browserOpen);
+    }
+
+    /// <summary>Asks the remote again, off the render thread so the city keeps moving.</summary>
+    void RequestRefresh()
+    {
+        if (_feed is null || _feed.Refreshing) return;
+
+        _feed.Refreshing = true;
+        _feed.LastError = null;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Handed to the render thread rather than applied here: the scene and the GL buffers
+                // belong to that thread, and a snapshot arriving mid-frame would tear the city.
+                _pendingSnapshot = await _feed.Fetch(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _feed.LastError = ex.Message;
+                _feed.Refreshing = false;
+            }
+        });
+    }
+
+    /// <summary>
+    /// Rebuilds the overlay from the current snapshot and whatever the browser is isolating.
+    /// </summary>
+    /// <remarks>
+    /// Isolation works by rebuilding the overlay from a snapshot holding one pull request rather
+    /// than by filtering boxes, which is why no box has to carry a pull-request number. The rebuild
+    /// is the same work the layout did at startup, over a few hundred boxes, on a keypress.
+    /// </remarks>
+    void ApplyOverlay()
+    {
+        if (_feed is null) return;
+
+        int isolated = _browser.IsolatedNumber;
+        var snapshot = _feed.Snapshot;
+
+        if (isolated >= 0 && snapshot.Available)
+        {
+            snapshot = new GitHubSnapshot
+            {
+                Available = true,
+                Repository = snapshot.Repository,
+                Issues = snapshot.Issues,
+                PullRequests = snapshot.PullRequests.Where(p => p.Number == isolated).ToList(),
+            };
+        }
+
+        _feed.Apply(snapshot);
+        RebuildCityBuffer();
+    }
+
+    void RebuildCityBuffer()
+    {
+        var instances = BuildInstances();
+        _totalInstances = instances.Length;
+        _boxes.Upload(instances);
+        _text.Build(_scene.Labels);
+    }
+
+    /// <summary>
+    /// The ImGui panel, drawn last of all and only when there is a remote to browse.
+    /// </summary>
+    /// <remarks>
+    /// After the post-process for the same reason the HUD is: interface text should be legible, not
+    /// bloomed. The controller has to be ticked every frame it exists, not only when the panel is
+    /// open, or its input state goes stale and the first click after opening is swallowed.
+    /// </remarks>
+    void DrawBrowser(double deltaTime)
+    {
+        if (_imgui is null || _feed is null) return;
+
+        _imgui.Update((float)deltaTime);
+
+        bool wasOpen = _browserOpen;
+        if (_browserOpen && _browser.Draw(_feed, ref _browserOpen, RequestRefresh)) ApplyOverlay();
+
+        // Closing the panel with its own title-bar cross has to give the mouse back, or you are
+        // left with a free cursor and no way to look around.
+        if (wasOpen && !_browserOpen) CaptureMouse(true);
+
+        _imgui.Render();
     }
 
     /// <summary>
@@ -1408,6 +1594,8 @@ public sealed class CityWindow : IDisposable
             ("F7", "airports", (_layers & CityLayer.Air) != 0),
             ("F8", "inspect", _inspectVisible),
             ("F10", "sidewalks", (_layers & CityLayer.Sidewalks) != 0),
+            ("O", "works (open PRs)", (_layers & CityLayer.Works) != 0),
+            ("P", "backlog queues", (_layers & CityLayer.Backlog) != 0),
             ("L", "labels", _labelsVisible),
             ("T", "traffic", _trafficVisible),
             ("M", "minimap", _minimapVisible),
@@ -1544,6 +1732,8 @@ public sealed class CityWindow : IDisposable
 
     void OnClosing()
     {
+        // Before the input context it subscribed to.
+        _imgui?.Dispose();
         _post.Dispose();
         _sky.Dispose();
         _terrain?.Dispose();

@@ -45,10 +45,66 @@ internal static class Terrain
     /// </remarks>
     internal const float Sink = 1.1f;
 
-    public static void Build(SceneGraph scene, Bounds2 city)
+    // --- coastal: the shape the ground takes when the projects are separate towns ---
+
+    /// <summary>Apron kept level beyond a town before the countryside starts rolling.</summary>
+    const float GreenBelt = 40f;
+
+    /// <summary>
+    /// How high the country between towns gets.
+    /// </summary>
+    /// <remarks>
+    /// Low, and deliberately so. This is downland between neighbouring towns, not a range dividing
+    /// them: anything tall enough to hide the next town turns a map into a maze, and the point of
+    /// laying the projects out separately is being able to see how they sit relative to each other.
+    /// </remarks>
+    const float HillHeight = 26f;
+
+    /// <summary>Level ground kept just inside the coast, so the shore is a shore and not a cliff.</summary>
+    const float ShoreMargin = 90f;
+
+    /// <summary>Distance over which the shore drops from land to sea level.</summary>
+    const float ShoreWidth = 70f;
+
+    /// <summary>Where the water sits, in the same space <see cref="Height"/> works in.</summary>
+    internal const float SeaLevel = -3f;
+
+    const float SeaFloor = -30f;
+
+    /// <summary>How the ground behaves outside the towns.</summary>
+    public enum Ground
     {
-        float minX = city.X - Extent, minZ = city.Z - Extent;
-        float maxX = city.X + city.Width + Extent, maxZ = city.Z + city.Depth + Extent;
+        /// <summary>Rises into a mountain range enclosing one city.</summary>
+        Continental,
+        /// <summary>
+        /// Open country between the towns, and sea around the lot.
+        /// </summary>
+        /// <remarks>
+        /// Two separate ideas, and it is worth saying why each one is where it is.
+        ///
+        /// <b>Between the towns: land.</b> They are parts of one solution and belong to one place,
+        /// so the ground between them is country you could walk across — low hills, plains and
+        /// woods. An earlier version made every town its own island and it said the wrong thing
+        /// entirely: separate projects are not separate worlds.
+        ///
+        /// <b>Around the whole thing: water.</b> The map has to end somewhere, and every boundary
+        /// that is not explained looks arbitrary — which the ring of mountains always did, being a
+        /// wall around a place for no reason anyone could see. A coastline explains itself. The land
+        /// stops because the sea starts, and nothing about it invites the question.
+        /// </remarks>
+        Coastal,
+    }
+
+    /// <param name="world">Everything the mesh must cover: one city, or the union of several.</param>
+    /// <param name="cities">
+    /// The rectangles that stay flat. One for a single city; one per city when the projects are laid
+    /// out as separate towns, in which case the ground rises in the countryside between them.
+    /// </param>
+    public static void Build(SceneGraph scene, Bounds2 world, IReadOnlyList<Bounds2> cities,
+        Ground ground = Ground.Continental)
+    {
+        float minX = world.X - Extent, minZ = world.Z - Extent;
+        float maxX = world.X + world.Width + Extent, maxZ = world.Z + world.Depth + Extent;
 
         int columns = (int)MathF.Ceiling((maxX - minX) / CellSize) + 1;
         int rows = (int)MathF.Ceiling((maxZ - minZ) / CellSize) + 1;
@@ -63,12 +119,12 @@ internal static class Terrain
         {
             float wx = minX + x * CellSize;
             float wz = minZ + z * CellSize;
-            float wy = Height(wx, wz, city);
+            float wy = Height(wx, wz, cities, world, ground);
             raw[z * columns + x] = wy;
 
             // Central differences against the same function give exact normals for free.
-            float dx = Height(wx + CellSize, wz, city) - Height(wx - CellSize, wz, city);
-            float dz = Height(wx, wz + CellSize, city) - Height(wx, wz - CellSize, city);
+            float dx = Height(wx + CellSize, wz, cities, world, ground) - Height(wx - CellSize, wz, cities, world, ground);
+            float dz = Height(wx, wz + CellSize, cities, world, ground) - Height(wx, wz - CellSize, cities, world, ground);
             var normal = Vector3.Normalize(new Vector3(-dx, 2f * CellSize, -dz));
 
             int at = (z * columns + x) * 6;
@@ -98,15 +154,24 @@ internal static class Terrain
         }
 
         scene.Terrain = new TerrainMesh { Vertices = vertices, Indices = indices.ToArray() };
-        PlantTrees(scene, city, minX, minZ, maxX, maxZ);
+
+        float lowest = 0f;
+        foreach (float height in raw) lowest = MathF.Min(lowest, height);
+        scene.LowestGround = lowest - Sink;
+
+        PlantTrees(scene, cities, world, minX, minZ, maxX, maxZ, ground);
     }
 
     /// <summary>
     /// Ground height at a point. Zero across the whole city, climbing outside it.
     /// </summary>
-    static float Height(float x, float z, Bounds2 city)
+    static float Height(float x, float z, IReadOnlyList<Bounds2> cities, Bounds2 world,
+        Ground ground)
     {
-        float outside = DistanceOutside(city, x, z);
+        float outside = DistanceOutside(cities, x, z);
+
+        if (ground == Ground.Coastal) return Country(x, z, outside, world);
+
         if (outside <= FlatMargin) return 0f;
 
         float ramp = Smoothstep(FlatMargin, FlatMargin + RampWidth, outside);
@@ -119,12 +184,104 @@ internal static class Terrain
         return ramp * ramp * PeakHeight * shape;
     }
 
-    /// <summary>How far a point lies outside the city rectangle; zero within it.</summary>
-    static float DistanceOutside(Bounds2 city, float x, float z)
+    /// <summary>
+    /// The country between the towns, and the coast around the lot.
+    /// </summary>
+    /// <remarks>
+    /// Two independent shapes multiplied together.
+    ///
+    /// <b>Inland</b>, height comes from how far you are from the nearest town: level over the town
+    /// and its apron, then rolling downland rising to <see cref="HillHeight"/>. Low enough to see
+    /// over, because the reason to lay projects out separately is to see how they sit relative to
+    /// one another, and a range between two towns hides exactly that.
+    ///
+    /// <b>At the edge</b>, everything is faded down into the sea by distance from the world
+    /// rectangle instead. Multiplying rather than choosing is what keeps the two from meeting at a
+    /// seam: a hill that happens to sit near the coast is drowned smoothly rather than sheared off
+    /// where the rules change.
+    /// </remarks>
+    static float Country(float x, float z, float fromTown, Bounds2 world)
     {
-        float dx = MathF.Max(MathF.Max(city.X - x, x - (city.X + city.Width)), 0f);
-        float dz = MathF.Max(MathF.Max(city.Z - z, z - (city.Z + city.Depth)), 0f);
+        // Inland: flat over the town and its apron, rolling beyond it.
+        float rise = Smoothstep(FlatMargin, FlatMargin + GreenBelt, fromTown);
+        float relief = Fbm(x * 0.0034f, z * 0.0034f, 4, 23);
+        float detail = Fbm(x * 0.0115f, z * 0.0115f, 2, 61);
+        float land = rise * HillHeight * (relief * 0.78f + detail * 0.22f);
+
+        // The coast, measured from the world rather than from any town. A wobble on the margin so
+        // the shoreline is a shoreline and not a rounded rectangle.
+        float fromEdge = DistanceOutside(world, x, z);
+        float wobble = Fbm(x * 0.0026f, z * 0.0026f, 3, 97) * 2f - 1f;
+        float margin = MathF.Max(20f, ShoreMargin * (1f + wobble * 0.6f));
+
+        if (fromEdge <= margin) return land;
+
+        // Down through the waterline, then out across the shelf to the floor.
+        const float ShoreDepth = SeaLevel - 6f;
+
+        float down = Smoothstep(margin, margin + ShoreWidth, fromEdge);
+        float shelf = Smoothstep(margin + ShoreWidth, margin + ShoreWidth + 320f, fromEdge);
+
+        return land * (1f - down) + down * ShoreDepth + shelf * (SeaFloor - ShoreDepth);
+    }
+
+    /// <summary>How far a point lies outside one rectangle; zero within it.</summary>
+    static float DistanceOutside(Bounds2 rect, float x, float z)
+    {
+        float dx = MathF.Max(MathF.Max(rect.X - x, x - (rect.X + rect.Width)), 0f);
+        float dz = MathF.Max(MathF.Max(rect.Z - z, z - (rect.Z + rect.Depth)), 0f);
         return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    /// <summary>
+    /// The sea itself: one quad over the whole world, at the waterline.
+    /// </summary>
+    /// <remarks>
+    /// A single plane rather than water fitted to each island, because the coast is already carved
+    /// into the ground. Where the land is above the line it stands out of the water; where it is
+    /// below, the water covers it. That is how it works outdoors, and it means the shoreline
+    /// follows the terrain exactly with nothing having to agree about where it is.
+    /// </remarks>
+    public static void Flood(SceneGraph scene, Bounds2 world)
+    {
+        float span = MathF.Max(world.Width, world.Depth) + Extent * 2f;
+
+        scene.Roads.Add(new RoadQuad
+        {
+            Center = new Vector3(world.CenterX, SeaLevel - Sink, world.CenterZ),
+            Length = span,
+            Width = span,
+            // Translucent so the seabed reads through it: shallows come out pale over the shore and
+            // the deep goes dark, with no depth information needed in the shader.
+            Color = new Vector4(0.10f, 0.26f, 0.36f, 0.80f),
+            Flags = (uint)RoadFlags.Sea,
+        });
+    }
+
+    /// <summary>
+    /// How far a point lies outside the nearest city; zero within any of them.
+    /// </summary>
+    /// <remarks>
+    /// The minimum over every city, which is the whole of what separate towns cost the heightfield:
+    /// each one keeps its own flat plate and its own skirt, and the ground climbs only where a point
+    /// is well clear of all of them. Everything downstream — normals, tree placement, the treeline —
+    /// samples this same function and so follows for free.
+    /// </remarks>
+    static float DistanceOutside(IReadOnlyList<Bounds2> cities, float x, float z)
+    {
+        float nearest = float.MaxValue;
+
+        foreach (var city in cities)
+        {
+            float dx = MathF.Max(MathF.Max(city.X - x, x - (city.X + city.Width)), 0f);
+            float dz = MathF.Max(MathF.Max(city.Z - z, z - (city.Z + city.Depth)), 0f);
+            float distance = MathF.Sqrt(dx * dx + dz * dz);
+
+            if (distance <= 0f) return 0f;
+            nearest = MathF.Min(nearest, distance);
+        }
+
+        return nearest == float.MaxValue ? 0f : nearest;
     }
 
     /// <summary>
@@ -135,9 +292,15 @@ internal static class Terrain
     /// Sampling the same height function the mesh is built from makes that impossible by
     /// construction. Steep faces and the ground above the treeline are left bare.
     /// </remarks>
-    static void PlantTrees(SceneGraph scene, Bounds2 city, float minX, float minZ,
-        float maxX, float maxZ)
+    static void PlantTrees(SceneGraph scene, IReadOnlyList<Bounds2> cities, Bounds2 world,
+        float minX, float minZ, float maxX, float maxZ, Ground ground)
     {
+        // Continental ground is flat for a long way out, and a tree standing on that skirt is a tree
+        // standing on hidden bedrock, so nothing is planted below the foothills. An island has no
+        // such skirt: its land is the strip between the town and the water, which is precisely
+        // where its woods belong.
+        float floorY = ground == Ground.Coastal ? 0.6f : 8f;
+
         const float Step = 26f;
         const float TreeLine = 165f;
 
@@ -152,18 +315,18 @@ internal static class Terrain
             float jx = x + (Hash(seed * 3) - 0.5f) * Step * 0.9f;
             float jz = z + (Hash(seed * 7 + 1) - 0.5f) * Step * 0.9f;
 
-            float y = Height(jx, jz, city);
+            float y = Height(jx, jz, cities, world, ground);
             // Well clear of the skirt, so no tree stands on ground hidden inside the bedrock.
-            if (y < 8f || y > TreeLine) continue;
+            if (y < floorY || y > TreeLine) continue;
 
             // Slope test: nothing takes root on a cliff.
-            float dx = Height(jx + 6f, jz, city) - Height(jx - 6f, jz, city);
-            float dz = Height(jx, jz + 6f, city) - Height(jx, jz - 6f, city);
+            float dx = Height(jx + 6f, jz, cities, world, ground) - Height(jx - 6f, jz, cities, world, ground);
+            float dz = Height(jx, jz + 6f, cities, world, ground) - Height(jx, jz - 6f, cities, world, ground);
             float slope = MathF.Sqrt(dx * dx + dz * dz) / 12f;
             if (slope > 1.15f) continue;
 
             // Thin out toward the treeline so the forest fades rather than stopping dead.
-            if (Hash(seed * 13 + 5) < y / TreeLine * 0.75f) continue;
+            if (ground == Ground.Continental && Hash(seed * 13 + 5) < y / TreeLine * 0.75f) continue;
 
             float scale = 4.5f + Hash(seed * 17 + 3) * 4.5f;
             // Same sink as the mesh, or every tree hovers a metre above the slope.

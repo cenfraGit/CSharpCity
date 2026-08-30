@@ -72,6 +72,9 @@ public static class SyntaxMetrics
     public static int StartLine(SyntaxNode node) =>
         node.SyntaxTree.GetLineSpan(node.Span).StartLinePosition.Line + 1;
 
+    public static int EndLine(SyntaxNode node) =>
+        node.SyntaxTree.GetLineSpan(node.Span).EndLinePosition.Line + 1;
+
     /// <summary>
     /// Heuristic for commented-out code: a comment whose text is shaped like a C# statement.
     /// </summary>

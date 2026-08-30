@@ -204,10 +204,15 @@ public sealed class SolutionAnalyzer
     public static bool RunAnalyzers { get; set; }
 
     /// <summary>
-    /// Whether to ask the repository what has been changing. Off by default for the same reason as
-    /// the analyzers: it is another external tool, and a solution outside a working tree simply has
-    /// no answer to give.
+    /// Whether to ask the repository what has been changing.
     /// </summary>
+    /// <remarks>
+    /// Unlike the analyzers, this defaults to on whenever the solution is inside a working tree —
+    /// see <see cref="GitHistory.IsRepository"/> and the flag handling in the app. Asking for a
+    /// history that exists costs one <c>git log</c>, and having to remember a flag to see the city
+    /// as it actually is was friction with nothing on the other side of it. A solution outside a
+    /// working tree still has no answer to give, and says so.
+    /// </remarks>
     public static bool ReadHistory { get; set; }
 
     /// <summary>
@@ -227,10 +232,15 @@ public sealed class SolutionAnalyzer
             return;
         }
 
-        Console.Error.WriteLine(
-            $"note: {history.TypesTouched:n0} type(s) matched to {history.FilesWithHistory:n0} " +
-            $"file(s) of history over the last {GitHistory.WindowDays} days; busiest is " +
-            $"{history.BusiestFile} with {history.BusiestCommits} commit(s).");
+        // The file count is all-time (that is what authorship is counted over); only the busiest
+        // figure is windowed. Saying so costs a clause and stops the two being read as one number.
+        string scope = $"note: {history.TypesTouched:n0} type(s) matched to " +
+                       $"{history.FilesWithHistory:n0} file(s) with history";
+
+        Console.Error.WriteLine(history.BusiestCommits == 0
+            ? $"{scope}; nothing committed in the last {GitHistory.WindowDays} days."
+            : $"{scope}; busiest in the last {GitHistory.WindowDays} days is " +
+              $"{history.BusiestFile} with {history.BusiestCommits} commit(s).");
     }
 
     /// <summary>Counts of each analyzer rule that fired, for reporting what a solution looks like.</summary>
@@ -577,6 +587,10 @@ public sealed class SolutionAnalyzer
             IsAsync = method.Modifiers.Any(SyntaxKind.AsyncKeyword),
             Complexity = body is null ? 1 : SyntaxMetrics.CyclomaticComplexity(body),
             MaxNesting = body is null ? 0 : SyntaxMetrics.MaxNestingDepth(body),
+            // The method's only identity. Overloads share a name and nothing else here, so a line
+            // span is what lets an external coverage report find this exact declaration.
+            StartLine = SyntaxMetrics.StartLine(method),
+            EndLine = SyntaxMetrics.EndLine(method),
         };
 
         if (result.Loc > 60)

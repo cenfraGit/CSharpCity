@@ -11,8 +11,36 @@ public sealed class Camera
     public float Yaw = -90f;
     public float Pitch;
     public bool Flying;
-    public float WalkSpeed = 14f;
-    public float FlySpeed = 45f;
+
+    /// <summary>
+    /// Cruising and sprint speeds, in metres per second, given as absolutes rather than as a base
+    /// and a multiplier.
+    /// </summary>
+    /// <remarks>
+    /// Sprint used to be a shared <c>× 3</c> on whichever base was active, which made the two
+    /// speeds impossible to tune independently: slowing the walk to something you could actually
+    /// read a street at also slowed the sprint that was already right. Four absolute numbers cost
+    /// two extra fields and say exactly what they mean.
+    ///
+    /// There is no acceleration or damping anywhere — a key press is full speed on the same frame —
+    /// so these four values are the entire feel of moving through the city.
+    /// </remarks>
+    public float WalkSpeed = 8f;
+    public float WalkSprintSpeed = 42f;
+    public float FlySpeed = 24f;
+    public float FlySprintSpeed = 135f;
+
+    /// <summary>
+    /// Space and Ctrl, which get their own pair rather than borrowing the horizontal ones.
+    /// </summary>
+    /// <remarks>
+    /// Roughly seventy per cent quicker than flying flat, because the two are not the same journey.
+    /// Horizontal speed is set by how fast a street should go past; vertical speed is set by how
+    /// long it takes to get above the rooftops and back down, and at level-flight pace that was a
+    /// tedious few seconds every time.
+    /// </remarks>
+    public float ClimbSpeed = 41f;
+    public float ClimbSprintSpeed = 230f;
     /// <summary>
     /// Vertical field of view in degrees. Wide enough to feel like standing in a street rather
     /// than looking down a telescope; the scroll wheel takes it from there.
@@ -37,6 +65,23 @@ public sealed class Camera
 
     public Vector3 Right => Vector3.Normalize(Vector3.Cross(Front, Vector3.UnitY));
 
+    /// <summary>
+    /// Where you are facing with the pitch thrown away: <see cref="Front"/> flattened onto the ground.
+    /// </summary>
+    /// <remarks>
+    /// Taken from the yaw directly rather than by flattening and renormalising <see cref="Front"/>,
+    /// which collapses to a zero-length vector when you look straight up or down — exactly the moment
+    /// you most need a heading.
+    /// </remarks>
+    public Vector3 Heading
+    {
+        get
+        {
+            var yaw = Yaw * MathF.PI / 180f;
+            return new Vector3(MathF.Cos(yaw), 0f, MathF.Sin(yaw));
+        }
+    }
+
     public Matrix4x4 View => Matrix4x4.CreateLookAt(Position, Position + Front, Vector3.UnitY);
 
     /// <remarks>
@@ -60,14 +105,26 @@ public sealed class Camera
     /// </summary>
     public void Move(Vector3 move, float deltaTime, bool sprinting)
     {
-        if (move.LengthSquared() > 0) move = Vector3.Normalize(move);
-        var speed = (Flying ? FlySpeed : WalkSpeed) * (sprinting ? 3f : 1f) * deltaTime;
+        // Normalised across the ground only, so holding Space while flying forward climbs at the
+        // full rate rather than trading half of it away for the forward motion. The two axes are
+        // independent controls and behave like it.
+        var ground = new Vector2(move.X, move.Z);
+        if (ground.LengthSquared() > 1f) ground = Vector2.Normalize(ground);
 
-        // Walking keeps forward motion in the ground plane so looking up doesn't launch you.
-        var forward = Flying ? Front : Vector3.Normalize(new Vector3(Front.X, 0, Front.Z));
-        Position += (Right * move.X + forward * move.Z) * speed;
+        float speed = (Flying
+            ? sprinting ? FlySprintSpeed : FlySpeed
+            : sprinting ? WalkSprintSpeed : WalkSpeed) * deltaTime;
 
-        if (Flying) Position += Vector3.UnitY * move.Y * speed;
+        // Both modes keep WASD in the ground plane, so looking up never launches you and looking
+        // down never drives you into the pavement. Flying used to follow the full look direction,
+        // which made altitude something you fought with the mouse instead of something you chose:
+        // any glance at a rooftop turned level flight into a climb. Height belongs to Space and
+        // Ctrl alone, where it can be held steady while you look wherever you like.
+        Position += (Right * ground.X + Heading * ground.Y) * speed;
+
+        if (Flying)
+            Position += Vector3.UnitY * Math.Clamp(move.Y, -1f, 1f)
+                        * (sprinting ? ClimbSprintSpeed : ClimbSpeed) * deltaTime;
         else Position.Y = EyeHeight;
     }
 

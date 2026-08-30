@@ -113,6 +113,37 @@ internal static class RoadGraphBuilder
             return widest;
         }
 
+        /// <summary>
+        /// The closest node to a point, or -1 if none is within <paramref name="radius"/>.
+        /// </summary>
+        /// <remarks>
+        /// The way onto the lattice for anything that arrives at an arbitrary angle.
+        /// <see cref="SpliceOntoLine"/> is the better join where it applies, but it can only insert
+        /// into a road running along an axis, and a bridge between two islands makes landfall on
+        /// whatever bearing the two happen to sit at.
+        /// </remarks>
+        /// <param name="below">
+        /// Consider only nodes added before this index. The caller uses it to exclude everything it
+        /// has just built: a bridge looking for the shore would otherwise find the node it laid a
+        /// moment ago, halfway along its own deck, and join to that instead.
+        /// </param>
+        public int NearestNode(Vector3 to, float radius, int below = int.MaxValue)
+        {
+            int best = -1;
+            float bestDistance = radius * radius;
+
+            for (int i = 0; i < Math.Min(below, Positions.Count); i++)
+            {
+                var delta = Positions[i] - to;
+                float distance = delta.X * delta.X + delta.Z * delta.Z;
+                if (distance >= bestDistance) continue;
+                bestDistance = distance;
+                best = i;
+            }
+
+            return best;
+        }
+
         /// <summary>Nodes sitting on one straight line, in order along it.</summary>
         public int[] NodesOnLine(bool vertical, float position, float tolerance = 0.5f)
         {

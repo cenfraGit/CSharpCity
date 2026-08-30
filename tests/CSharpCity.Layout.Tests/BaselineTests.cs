@@ -26,28 +26,38 @@ public class BaselineTests
     /// Recorded before the street rework began, against the shapes in
     /// <see cref="LayoutInvariantTests.Shapes"/>.
     /// </summary>
+    /// <remarks>
+    /// Re-baselined twice, and both times the evidence that it was deliberate is in what did
+    /// <em>not</em> move.
+    ///
+    /// First when footpaths were dropped from the top of the layer stack onto the ground and broken
+    /// where roads cross them, which is what stopped the walkers hovering at head height: walker
+    /// counts, rail, air and every building came out byte-identical.
+    ///
+    /// Second when data-only types became warehouses instead of anonymous squat storeys. Every
+    /// non-building field was byte-identical again, and every count rose by exactly twice the number
+    /// of types with no methods — a warehouse is three boxes where a storey was one. For the
+    /// fixture that is <c>t % 7 == 0</c>: 1→3 and 2→6 on the single-type shapes, +12 over 40 types,
+    /// +24 over 3×25, +400 over 40×30. An arithmetic match that exact is the proof the change was
+    /// additive and nothing shifted underneath it.
+    /// </remarks>
     static readonly Dictionary<string, string> Expected = new()
     {
         ["1-1-1"] =
             "walkers=0 paths=0000000000000000 footpaths=0:0000000000000000 rail=0 air=0 " +
-            "buildings=1:3a244b3e2ed46857",
-        // Re-baselined when footpaths were dropped from the top of the layer stack onto the ground
-        // and broken where roads cross them, which is what stopped the walkers hovering at head
-        // height. Note what did *not* move when it was: walker counts, rail, air and every
-        // building are byte-identical, which is the evidence that the change stayed where it was
-        // meant to.
+            "buildings=3:cb99f3632170fdbf",
         ["1-40-1"] =
             "walkers=308 paths=233763505d20e39d footpaths=169:442163ef7b8700fd rail=0 air=1 " +
-            "buildings=121:3398f42f14e6d8c2",
+            "buildings=133:c771a319169ca0d4",
         ["3-25-4"] =
             "walkers=660 paths=de90c066eabf8d94 footpaths=377:64638466e783a208 rail=14 air=3 " +
-            "buildings=219:6329ea5db3434432",
+            "buildings=243:5d7cce230e424064",
         ["40-30-3"] =
             "walkers=11881 paths=a0f5b79a0a94b30d footpaths=8552:23c9512574a478d1 rail=273 air=40 " +
-            "buildings=3600:da3f51e47dcb8128",
+            "buildings=4000:ef074f18da4fc69b",
         ["2-1-5"] =
             "walkers=1 paths=880f6f1fd6784aec footpaths=1:c253821166ef49b6 rail=2 air=2 " +
-            "buildings=2:b52a3e6b6a6bcbe4",
+            "buildings=6:e0778a7e7e4292e0",
     };
 
     [Theory]

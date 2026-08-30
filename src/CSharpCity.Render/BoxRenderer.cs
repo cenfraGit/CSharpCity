@@ -363,6 +363,8 @@ public sealed unsafe class BoxRenderer : IDisposable
         const uint FLAG_WATER     = 1024u;
         const uint FLAG_CONE      = 2048u;
         const uint FLAG_ROUND     = 4096u;
+        const uint FLAG_GHOST     = 8192u;
+        const uint FLAG_DAMP      = 16384u;
 
         // Cheap value noise for grime.
         float hash(vec2 p) {
@@ -432,6 +434,25 @@ public sealed unsafe class BoxRenderer : IDisposable
                 return;
             }
 
+            // A proposal, not a building: drawn rather than built, so it reads as a survey drawing
+            // standing up in the air. Bright edges give it a silhouette that survives being seen
+            // against a solid facade, and the setting-out lines climbing it say "this is a drawing"
+            // in a way that a merely faint box never did â€” the city already has eight kinds of
+            // translucent scenery, and one more would just read as smog.
+            if ((vFlags & FLAG_GHOST) != 0u) {
+                vec2 face = abs(vLocal.xz);
+                float edge = max(smoothstep(0.42, 0.5, face.x), smoothstep(0.42, 0.5, face.y));
+                edge = max(edge, smoothstep(0.94, 1.0, vLocal.y));
+
+                float lines = smoothstep(0.72, 1.0, fract(vLocal.y * vSize.y * 0.34));
+                float glow = clamp(edge + lines * 0.55, 0.0, 1.0);
+
+                vec3 drawn = albedo * (0.7 + 1.7 * glow);
+                FragColor = vec4(drawn * (1.1 + 0.5 * uNight),
+                                 clamp(alpha + glow * 0.55, 0.0, 1.0));
+                return;
+            }
+
             if ((vFlags & FLAG_EMISSIVE) != 0u) {
                 FragColor = vec4(albedo * (1.4 + 0.6 * uNight), alpha);
                 return;
@@ -497,6 +518,17 @@ public sealed unsafe class BoxRenderer : IDisposable
                 float streak = hash(floor(vec2(vFacadeUv.x * 3.0, 0.0)));
                 float soot = smoothstep(0.2, 1.0, streak) * (1.0 - vHeightFrac * 0.5);
                 albedo = mix(albedo, vec3(0.12, 0.10, 0.09), soot * 0.55);
+            }
+
+            // --- damp: no test reaches the method this storey stands for ---
+            // Green, and rising from the slab rather than running down from the top, so it can
+            // never be confused with the soot above it. Two kinds of neglect on one wall have to
+            // differ in more than intensity to stay readable.
+            if (isSide && (vFlags & FLAG_DAMP) != 0u) {
+                float tide = 1.0 - smoothstep(0.0, 0.62, vHeightFrac);
+                float mottle = hash(floor(vec2(vFacadeUv.x * 5.0, vHeightFrac * 6.0)));
+                float moss = tide * (0.45 + 0.55 * mottle);
+                albedo = mix(albedo, vec3(0.16, 0.30, 0.14), moss * 0.62);
             }
 
             // --- lighting: one directional sun, hemispheric ambient, vertical fake AO ---

@@ -86,6 +86,17 @@ public static class CityLayout
     const double GrimyComplexity = 6.0;
 
     /// <summary>
+    /// Statement coverage below which a floor reads as untested.
+    /// </summary>
+    /// <remarks>
+    /// Not zero. A method whose only covered lines are its signature and a guard clause is
+    /// technically "covered" and practically is not, and a hard zero would show nothing at all on
+    /// the long tail of methods a test brushes past on its way somewhere else. Half is a bar that a
+    /// method genuinely under test clears easily.
+    /// </remarks>
+    const double UncoveredBelow = 0.5;
+
+    /// <summary>
     /// Smog range, calibrated against real data rather than guessed. Measured across a large
     /// real-world solution's districts, average complexity runs from 1.0 to 8.0 — an earlier
     /// threshold of 4.5 left only a handful of districts hazy at all, and a divisor of 8 made even
@@ -144,7 +155,18 @@ public static class CityLayout
                 $"        {crossing.From} -> {crossing.To}: {crossing.Weight:n0}");
     }
 
-    public static SceneGraph Build(CityModel model)
+    /// <param name="github">
+    /// What the remote is doing right now, or null. Everything built from this is the overlay: it
+    /// dresses buildings that are already placed and never moves one, so the city is identical with
+    /// and without it.
+    /// </param>
+    /// <param name="separateCities">
+    /// Lay each project out as a town of its own, with open country between them, rather than as a
+    /// district of one city. Opt-in: the packed layout stays the known-good default, and having both
+    /// means the two can be compared on the same solution.
+    /// </param>
+    public static SceneGraph Build(CityModel model, GitHubSnapshot? github = null,
+        bool separateCities = false)
     {
         var scene = new SceneGraph();
         var projects = model.Projects.Where(p => p.Types.Count > 0)
@@ -176,21 +198,48 @@ public static class CityLayout
         // between districts and the breathing room that makes the city walkable rather than packed.
         float citySide = MathF.Max(160f, MathF.Sqrt(totalWeight) * 2.8f);
 
+        // One square holding every project, or one square per project with countryside between —
+        // see Countryside.Spread. Either way this ends with `cityBounds` covering everything and
+        // `flatGround` listing the rectangles the terrain must keep level.
         var cityBounds = new Bounds2(0, 0, citySide, citySide);
+        var flatGround = new List<Bounds2>();
         // Boulevards between districts scale with the city, so a 40-district map doesn't end up with
         // the same alleys a 5-district one had.
         float boulevardWidth = Math.Clamp(citySide * 0.011f, 7f, 18f);
         var districtCuts = new List<Treemap.Cut>();
 
-        Treemap.Layout(
-            districts.Select(d => (d.Project, d.Weight)).ToList(),
-            cityBounds,
-            (project, cell) => LayDistrict(scene, project, roles,
-                StreetNetwork.InsetFromCuts(cell, cityBounds, boulevardWidth * 0.5f)),
-            cut => districtCuts.Add(cut));
+        if (separateCities)
+        {
+            cityBounds = Countryside.World(citySide);
 
-        foreach (var cut in districtCuts)
-            StreetNetwork.AddCut(scene, cut, boulevardWidth, RoadClass.Boulevard);
+            Treemap.Layout(
+                districts.Select(d => (d.Project, d.Weight)).ToList(),
+                cityBounds,
+                (project, cell) =>
+                {
+                    var town = Countryside.Town(cell, citySide);
+                    flatGround.Add(town);
+                    LayDistrict(scene, project, roles, town);
+                },
+                // The world-level divisions are countryside, not roads. A boulevard laid along one
+                // would run for half a kilometre through the hills between two towns, joining
+                // nothing to nothing.
+                _ => { });
+        }
+        else
+        {
+            flatGround.Add(cityBounds);
+
+            Treemap.Layout(
+                districts.Select(d => (d.Project, d.Weight)).ToList(),
+                cityBounds,
+                (project, cell) => LayDistrict(scene, project, roles,
+                    StreetNetwork.InsetFromCuts(cell, cityBounds, boulevardWidth * 0.5f)),
+                cut => districtCuts.Add(cut));
+
+            foreach (var cut in districtCuts)
+                StreetNetwork.AddCut(scene, cut, boulevardWidth, RoadClass.Boulevard);
+        }
 
         // Every road the treemap cut is now known. Work out where they actually meet, once, and
         // build the single network that everything drivable routes over.
@@ -227,12 +276,22 @@ public static class CityLayout
                     ? $"; {pavement.Skipped} stretch(es) left unpaved (too short, or over budget)."
                     : "."));
 
-        scene.CityBounds = new Bounds2(0, 0, citySide, citySide);
+        scene.CityBounds = cityBounds;
 
         // Traffic is a second pass: routing a dependency needs every building already placed, both
         // to know where the endpoints are and to know what's in the way.
         var traffic = TrafficNetwork.Build(scene, model);
-        Terrain.Build(scene, cityBounds);
+        Terrain.Build(scene, cityBounds, flatGround,
+            separateCities ? Terrain.Ground.Coastal : Terrain.Ground.Continental);
+
+        if (separateCities)
+        {
+            Terrain.Flood(scene, cityBounds);
+            Console.Error.WriteLine(
+                $"note: {flatGround.Count} town(s) across {cityBounds.Width:0}m of open country, " +
+                "with the coast beyond. Each town keeps its own streets; rail is the only way " +
+                "between them.");
+        }
 
         // The ride used to be a precomputed random walk through the streets, played back on rails.
         // It is now an ordinary car in TrafficSim with somewhere to be, so nothing is baked here.
@@ -251,6 +310,25 @@ public static class CityLayout
 
         var railAir = RailAndAir.Build(scene, model);
         var emergency = EmergencyServices.Build(scene, model);
+
+        // The overlay, last of all: it dresses buildings, junctions and civic forecourts that all
+        // have to exist first. Everything it adds is tagged CityLayer.Works or CityLayer.Backlog,
+        // which is what lets it be thrown away and rebuilt without disturbing the city under it.
+        if (github is { Available: true })
+        {
+            var works = Works.Apply(scene, model, github);
+            if (works.Sites > 0 || works.Queueing > 0)
+                Console.Error.WriteLine(
+                    $"note: {works.Sites:n0} building(s) under works from " +
+                    $"{works.PullRequests:n0} pull request(s)" +
+                    (works.Ghosts > 0 ? $", {works.Ghosts:n0} not built yet" : "") +
+                    (works.Demolitions > 0 ? $", {works.Demolitions:n0} for demolition" : "") +
+                    (works.Closures > 0 ? $", {works.Closures:n0} road closure(s)" : "") +
+                    $"; {works.Queueing:n0} person/people queueing at the civic buildings" +
+                    (works.Dropped > 0
+                        ? $"; {works.Dropped:n0} changed file(s) not shown (capped)."
+                        : "."));
+        }
 
         if (emergency.CrimeScenes + emergency.Fires + emergency.Leaks > 0)
             Console.Error.WriteLine(
@@ -580,6 +658,11 @@ public static class CityLayout
         bool dead = smells.ContainsKey(SmellKind.DeadCode);
         bool grimy = type.AvgComplexity >= GrimyComplexity && !dead;
 
+        // Where the windows ended up, recorded as the storeys go up so that anything which ought to
+        // come out of a window can find one. The alternative is recomputing the floor stack from the
+        // same formula somewhere else, which works right up until one of the two copies changes.
+        var storeys = new List<Storey>();
+
         // Deep hierarchies literally teeter: a narrow plinth raises the building one level per
         // step below the root of its inheritance chain.
         float plinthHeight = type.InheritanceDepth * 1.4f;
@@ -631,14 +714,15 @@ public static class CityLayout
                 break;
 
             default:
-                y = StackFloors(scene, type, center, side, y, pickId, dead, grimy);
+                y = StackFloors(scene, type, center, side, y, pickId, dead, grimy, storeys);
                 break;
         }
 
         AddRoofDetail(scene, type, center, side, y, pickId, smells);
         Fixtures.Apply(scene, type, center, side, y, pickId);
+        Vernacular.Apply(scene, type, lot, center, side, y, pickId);
         AddDoors(scene, type, center, side, plinthHeight, pickId);
-        AddSmellProps(scene, type, lot, center, side, y, pickId, smells);
+        AddSmellProps(scene, type, lot, center, side, y, pickId, smells, storeys);
         AddNameplate(scene, type, center, side, y, smells);
 
         // Last, and deliberately so: `y` is the finished roof height and `side` the real footprint.
@@ -726,8 +810,32 @@ public static class CityLayout
     /// becomes a single grotesquely stretched storey you can spot from the street. Each floor lights
     /// up at night only if its method is public - that's the API-surface view.
     /// </summary>
+    /// <summary>
+    /// One storey of a building, and where its windows are.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors what the fragment shader does with the same numbers: one row of windows per storey,
+    /// <see cref="Windows"/> of them across each facade, each centred in its own column and a little
+    /// above the middle of the floor. The shader only draws them at all above a certain storey
+    /// height, and <see cref="HasWindows"/> repeats that bar so nothing is placed on a blank wall.
+    /// </remarks>
+    internal readonly record struct Storey(float BaseY, float Height, int Windows)
+    {
+        /// <summary>Matches the shader's <c>vStoreyHeight &gt; 2.0</c> gate.</summary>
+        public bool HasWindows => Height > 2f;
+
+        /// <summary>Height of the window row's centre, in world units.</summary>
+        public float WindowY => BaseY + Height * 0.52f;
+
+        /// <summary>
+        /// Offset of one window's centre from the middle of the facade, as a fraction of the side.
+        /// </summary>
+        public float WindowAcross(int index) =>
+            (index + 0.5f) / MathF.Max(Windows, 1) - 0.5f;
+    }
+
     static float StackFloors(SceneGraph scene, TypeNode type, Vector3 center, float side, float y,
-        int pickId, bool dead, bool grimy)
+        int pickId, bool dead, bool grimy, List<Storey> storeys)
     {
         var baseColor = KindColor(type.Kind);
         var flags = BoxFlags.Windows;
@@ -735,11 +843,13 @@ public static class CityLayout
         if (dead) flags |= BoxFlags.Abandoned;
         if (type.Kind == TypeKind.AbstractClass) flags |= BoxFlags.Scaffold;
 
-        // A type with no methods is still a building - data-only types get a single squat storey.
+        // A type with no methods holds state and does nothing with it, so it gets a warehouse. The
+        // height is the same as when it was an anonymous squat storey: what it looks like changed,
+        // how big it is did not.
         if (type.Methods.Count == 0)
         {
             float h = MathF.Max(2.8f, (type.FieldCount + type.PropertyCount) * 0.35f + 2.5f);
-            scene.Boxes.Add(Box(center, y, side, h, baseColor, pickId, flags, 3f));
+            Vernacular.Warehouse(scene, type, center, side, y, h, pickId);
 
             // No methods means no floors to label, but the data it holds is still worth naming.
             scene.Labels.Add(new WorldLabel
@@ -763,14 +873,25 @@ public static class CityLayout
             var floorFlags = flags;
             if (method.IsPublic && !dead) floorFlags |= BoxFlags.LitWindows;
 
+            // A floor no test reaches goes damp. Coverage is per method and a floor is a method, so
+            // this is the one channel in the city whose grain matches its metric exactly.
+            //
+            // The -1 check is the whole point: unmeasured is not the same as uncovered. Without a
+            // coverage report every floor of every building would be damp, and the city would read
+            // as untested when it is merely unmeasured.
+            if (method.Coverage >= 0 && method.Coverage < UncoveredBelow)
+                floorFlags |= BoxFlags.Damp;
+
             // Slight per-floor tint variation keeps a tall stack from reading as one flat slab.
             float tint = 0.94f + StableRandom(type.Id, method.Name.GetHashCode()) * 0.12f;
 
+            // Windows across the facade = parameters. A 6-parameter method is a wall of glass.
+            int windows = Math.Clamp(method.ParameterCount, 1, 8);
+            storeys.Add(new Storey(y, height, windows));
+
             var floorBox = Box(center, y, side, height,
                 new Vector4(baseColor.X * tint, baseColor.Y * tint, baseColor.Z * tint, baseColor.W),
-                pickId, floorFlags,
-                // Windows across the facade = parameters. A 6-parameter method is a wall of glass.
-                Math.Clamp(method.ParameterCount, 1, 8));
+                pickId, floorFlags, windows);
             floorBox.Damage = NullDamage(type);
             scene.Boxes.Add(floorBox);
 
@@ -995,20 +1116,74 @@ public static class CityLayout
     /// fire. The shape does the work in daylight; the flicker and the night-boosted emission in the
     /// shader do it after dark, when a swallowed exception should be the brightest thing around.
     /// </remarks>
-    static void AddFire(SceneGraph scene, TypeNode type, Vector3 wall, int index, int pickId)
+    /// <summary>
+    /// Picks a window on the building, and which way it faces.
+    /// </summary>
+    /// <remarks>
+    /// Fire used to be placed at a random height on a random point of the east wall, which put it in
+    /// front of blank render as often as not and made it read as floating in mid-air beside the
+    /// building. A fire comes <em>out</em> of something. Reading the storey list back gives the exact
+    /// window the shader drew, so the flame starts where the glass is.
+    ///
+    /// Falls back to a point on the wall when the building has no windows to speak of — an obelisk,
+    /// or a stack of one-line methods too short for the shader to draw glass on.
+    /// </remarks>
+    static (Vector3 At, Vector3 Outward) WindowOn(TypeNode type, IReadOnlyList<Storey> storeys,
+        Vector3 center, float side, float roofY, int seed)
+    {
+        // Faces in a fixed order, so a building with several fires spreads them round it rather than
+        // stacking them all on one wall.
+        var outward = (seed & 3) switch
+        {
+            0 => new Vector3(1f, 0f, 0f),
+            1 => new Vector3(0f, 0f, 1f),
+            2 => new Vector3(-1f, 0f, 0f),
+            _ => new Vector3(0f, 0f, -1f),
+        };
+        var across = new Vector3(-outward.Z, 0f, outward.X);
+
+        var glazed = storeys.Where(s => s.HasWindows).ToList();
+        if (glazed.Count == 0)
+        {
+            float loose = 2.5f + StableRandom(type.Id, seed * 23 + 3) * MathF.Max(roofY - 4f, 1f);
+            return (center + outward * (side * 0.5f)
+                    + across * ((StableRandom(type.Id, seed * 19) - 0.5f) * side * 0.7f)
+                    + Vector3.UnitY * loose,
+                outward);
+        }
+
+        var storey = glazed[(int)(StableRandom(type.Id, seed * 37 + 11) * glazed.Count) % glazed.Count];
+        int window = (int)(StableRandom(type.Id, seed * 41 + 5) * storey.Windows) % storey.Windows;
+
+        return (center
+                + outward * (side * 0.5f)
+                + across * (storey.WindowAcross(window) * side)
+                + Vector3.UnitY * storey.WindowY,
+            outward);
+    }
+
+    static void AddFire(SceneGraph scene, TypeNode type, Vector3 wall, Vector3 outward, int index,
+        int pickId)
     {
         const int Tongues = 5;
         float scale = 1.15f + StableRandom(type.Id, index * 31 + 7) * 0.7f;
+        var across = new Vector3(-outward.Z, 0f, outward.X);
 
-        // Wide, hot bed at the window, narrowing and rising into tongues of flame.
+        // Wide, hot bed at the window, narrowing and rising into tongues of flame that lean out of
+        // the opening and back against the wall as they climb — which is what a window fire does,
+        // and what tells you at a glance which floor it is on.
         for (int i = 0; i < Tongues; i++)
         {
             float t = i / (float)Tongues;
             float lean = (StableRandom(type.Id, index * 29 + i * 5) - 0.5f) * 1.3f * t;
 
+            // Furthest out at the sill, drawn back towards the facade as the flame rises.
+            float reach = 0.35f + (0.55f - t * 0.5f) * scale;
+
             scene.Boxes.Add(new BoxInstance
             {
-                BasePosition = wall + new Vector3(lean * 0.6f, t * 3.0f * scale, lean),
+                BasePosition = wall + outward * reach + across * lean
+                               + Vector3.UnitY * (t * 3.0f * scale),
                 Size = new Vector3(
                     (2.1f - t * 1.25f) * scale,
                     (2.0f - t * 0.7f) * scale,
@@ -1080,7 +1255,7 @@ public static class CityLayout
 
     /// <summary>The Â§1.5 smell catalogue, as physical objects on the lot.</summary>
     static void AddSmellProps(SceneGraph scene, TypeNode type, Bounds2 lot, Vector3 center, float side,
-        float roofY, int pickId, Dictionary<SmellKind, int> smells)
+        float roofY, int pickId, Dictionary<SmellKind, int> smells, IReadOnlyList<Storey> storeys)
     {
         // A crane for work somebody wrote down and never came back to.
         //
@@ -1138,9 +1313,8 @@ public static class CityLayout
         // A compile error is an active emergency: the building is ablaze, not merely smouldering.
         for (int i = 0; i < Math.Min(type.CompileErrors, 4); i++)
         {
-            float y = 2.5f + StableRandom(type.Id, i * 23 + 3) * MathF.Max(roofY - 4f, 1f);
-            AddFire(scene, type, center + new Vector3(side * 0.5f, y,
-                (StableRandom(type.Id, i * 19) - 0.5f) * side), i + 40, pickId);
+            var (at, outward) = WindowOn(type, storeys, center, side, roofY, i + 40);
+            AddFire(scene, type, at, outward, i + 40, pickId);
         }
 
         // A swallowed exception is a fire nobody is coming to put out.
@@ -1148,9 +1322,8 @@ public static class CityLayout
         {
             for (int i = 0; i < Math.Min(fires, 6); i++)
             {
-                float fireY = 3f + StableRandom(type.Id, i * 13 + 5) * MathF.Max(roofY - 5f, 1f);
-                var wall = center + new Vector3(side * 0.5f, fireY, (StableRandom(type.Id, i * 17) - 0.5f) * side);
-                AddFire(scene, type, wall, i, pickId);
+                var (at, outward) = WindowOn(type, storeys, center, side, roofY, i);
+                AddFire(scene, type, at, outward, i, pickId);
             }
         }
 

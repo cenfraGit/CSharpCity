@@ -60,6 +60,17 @@ public sealed class SceneGraph
     /// <summary>Buildings forced to overrun their lot because the treemap cell was too small.</summary>
     public int CrampedLots { get; set; }
 
+    /// <summary>
+    /// The lowest point of the terrain mesh, so the bedrock backstop can be put below it.
+    /// </summary>
+    /// <remarks>
+    /// Recorded rather than assumed because the ground no longer has one shape. The bedrock used to
+    /// sit at a fixed depth chosen for a city on a plain, and the moment the ground learned to go
+    /// below sea level that fixed slab surfaced <em>through</em> the water — a grey sheet over every
+    /// channel, blue again only once you dropped beneath it.
+    /// </remarks>
+    public float LowestGround { get; set; }
+
     public Vector3 SpawnPosition { get; set; } = new(0, 1.7f, 0);
     public float SpawnYaw { get; set; } = -90f;
     public Bounds2 CityBounds { get; set; } = new(0, 0, 1, 1);
@@ -130,6 +141,30 @@ public enum BoxFlags : uint
     /// things that read as obviously wrong when square — a bicycle wheel most of all.
     /// </remarks>
     Round = 1 << 12,
+    /// <summary>
+    /// A building that does not exist yet: the shape a pull request proposes to add.
+    /// </summary>
+    /// <remarks>
+    /// Drawn as a survey drawing standing up in the air rather than as a faint solid. Translucency
+    /// alone was not enough — the city already has eight kinds of translucent scenery and a dim box
+    /// among them reads as smog, not as a proposal — so this adds bright horizontal setting-out
+    /// lines and glowing edges. It should look drawn rather than built, because that is exactly what
+    /// it is: nobody has merged it, and it may never exist at all.
+    ///
+    /// Deliberately not <see cref="Glass"/>, which already means "interface" and would make every
+    /// proposed class look like one.
+    /// </remarks>
+    Ghost = 1 << 13,
+    /// <summary>
+    /// Damp and moss creeping up this storey: no test reaches the method it stands for.
+    /// </summary>
+    /// <remarks>
+    /// Green and rising from the floor slab, deliberately, because the nearest neighbour in the city
+    /// is <see cref="Grimy"/> — which means complexity, is dark, and streaks <em>downward</em> from
+    /// the top. Hue and direction are what keep two kinds of neglect from being mistaken for each
+    /// other on the same wall.
+    /// </remarks>
+    Damp = 1 << 14,
 }
 
 /// <summary>One row of the worst-buildings ranking.</summary>
@@ -155,6 +190,8 @@ public sealed class PointOfInterest
     public float Distance = 34f;
     public string Headline = "";
     public string Detail = "";
+    /// <summary>Which layer raised this, so a rebuilt layer can take its tour stops with it.</summary>
+    public CityLayer Layer;
 }
 
 /// <summary>Where a type's building stands. Roads are routed between these after layout finishes.</summary>
@@ -229,6 +266,16 @@ public enum CityLayer : uint
     Air = 1 << 5,
     /// <summary>Kerbs and everything standing on them. Off-switch for a busy street scene.</summary>
     Sidewalks = 1 << 7,
+    /// <summary>
+    /// Everything built from open pull requests: scaffolding, hoardings, ghosts, closures.
+    /// </summary>
+    /// <remarks>
+    /// The whole overlay carries this so it can be discarded and rebuilt as a block when the remote
+    /// is re-read, without touching a single box of the city underneath.
+    /// </remarks>
+    Works = 1 << 8,
+    /// <summary>The issue backlog: the people queueing outside the civic buildings.</summary>
+    Backlog = 1 << 9,
 }
 
 [Flags]
@@ -255,6 +302,17 @@ public enum RoadFlags : uint
     Parking = 1 << 8,
     /// <summary>The pool a lamp casts: a soft disc, night only, and never lit by the sun.</summary>
     LightPool = 1 << 9,
+    /// <summary>
+    /// Open water, covering the whole world rather than sitting in a hole in it.
+    /// </summary>
+    /// <remarks>
+    /// Not <see cref="Pond"/>, which carves a small irregular outline out of its quad and discards
+    /// everything beyond it — tile that across a map and you get a field of lozenges, not a sea.
+    /// This covers its quad edge to edge and is translucent, so the seabed shows through: shallows
+    /// come out pale over the shore and the deep goes dark, without the surface having to know
+    /// anything at all about the ground beneath it.
+    /// </remarks>
+    Sea = 1 << 10,
 }
 
 /// <summary>
@@ -338,6 +396,8 @@ public sealed class WorldLabel
     public float FaceRadius;
     /// <summary>Higher wins when two labels fight for the same patch of screen.</summary>
     public int Priority;
+    /// <summary>Which layer raised this, so a rebuilt layer can take its signage with it.</summary>
+    public CityLayer Layer;
 }
 
 public sealed class PickInfo

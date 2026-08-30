@@ -72,8 +72,15 @@ public static class GitHistory
             touched++;
         }
 
+        // A file is in the dictionary if it has ever been touched, because authors are counted over
+        // all history — so "the busiest file" is only meaningful once something has actually been
+        // committed inside the window. On a repository last touched a month ago every file ties on
+        // zero, and naming whichever one sorted first would be an arbitrary fact dressed up as a
+        // finding.
         var busiest = history.OrderByDescending(e => e.Value.Commits).First();
-        return new Result(true, history.Count, touched, busiest.Key, busiest.Value.Commits, null);
+        return busiest.Value.Commits == 0
+            ? new Result(true, history.Count, touched, "", 0, null)
+            : new Result(true, history.Count, touched, busiest.Key, busiest.Value.Commits, null);
     }
 
     internal sealed class FileHistory
@@ -159,6 +166,17 @@ public static class GitHistory
 
         return full[prefix.Length..].TrimStart('\\', '/').Replace('\\', '/');
     }
+
+    /// <summary>
+    /// Whether this solution sits inside a working tree, and so has a history worth asking for.
+    /// </summary>
+    /// <remarks>
+    /// The caller decides what to do about it. Note this answers "is there a repository", not "can
+    /// it be read" — git may still be absent from PATH, which <see cref="Apply"/> reports in the
+    /// ordinary way rather than treating as an error.
+    /// </remarks>
+    public static bool IsRepository(string? solutionPath) =>
+        FindRepositoryRoot(solutionPath) is not null;
 
     /// <summary>Walks up from the solution looking for a working tree.</summary>
     internal static string? FindRepositoryRoot(string? solutionPath)

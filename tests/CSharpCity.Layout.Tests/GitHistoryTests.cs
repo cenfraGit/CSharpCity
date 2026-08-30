@@ -122,4 +122,41 @@ public class GitHistoryTests
         Assert.NotNull(result.Reason);
         Assert.All(model.Projects.SelectMany(p => p.Types), t => Assert.Equal(0, t.Commits));
     }
+
+    [Fact]
+    public void AWorkingTreeIsRecognisedFromAnywhereBeneathIt()
+    {
+        // This predicate is what decides whether history is read at all now that the flag is gone,
+        // so it has to hold for a solution nested well below the repository root.
+        string root = Path.Combine(Path.GetTempPath(), $"repo-{Guid.NewGuid():N}");
+        string nested = Path.Combine(root, "src", "App");
+        Directory.CreateDirectory(Path.Combine(root, ".git"));
+        Directory.CreateDirectory(nested);
+
+        try
+        {
+            Assert.True(GitHistory.IsRepository(Path.Combine(nested, "App.slnx")));
+            Assert.False(GitHistory.IsRepository(
+                Path.Combine(Path.GetTempPath(), $"bare-{Guid.NewGuid():N}", "x.slnx")));
+            Assert.False(GitHistory.IsRepository(null));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AQuietWindowNamesNoBusiestFile()
+    {
+        // Files are recorded whenever they have ever been touched, because authorship is counted
+        // over all history. On a repository nobody has committed to this week every file ties on
+        // zero, and reporting whichever one sorted first reads as a finding when it is an accident.
+        var log = Log(("sam@example.com", 400, new[] { (10, 2, "src/A.cs") }));
+
+        var history = GitHistory.Parse(log);
+
+        Assert.True(history.ContainsKey("src/A.cs"));
+        Assert.Equal(0, history["src/A.cs"].Commits);
+    }
 }

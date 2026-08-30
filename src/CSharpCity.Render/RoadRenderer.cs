@@ -273,6 +273,7 @@ public sealed unsafe class RoadRenderer : IDisposable
         const uint FLAG_FOOTPATH     = 1u << 4;
         const uint FLAG_RAIL         = 1u << 5;
         const uint FLAG_POND         = 1u << 6;
+        const uint FLAG_SEA          = 1u << 10;
         const uint FLAG_COURT        = 1u << 7;
         const uint FLAG_PARKING      = 1u << 8;
         const uint FLAG_LIGHT_POOL   = 1u << 9;
@@ -352,6 +353,28 @@ public sealed unsafe class RoadRenderer : IDisposable
                 paint += 1.0 - smoothstep(0.0, 0.006, min(vUv.x, 1.0 - vUv.x));
 
                 albedo = mix(albedo, vec3(0.86, 0.86, 0.82), clamp(paint, 0.0, 1.0) * 0.85);
+            }
+
+            // Open sea. No outline to carve: it runs to the edge of its quad, and what shapes the
+            // coast is the land rising through it, not the water stopping.
+            if ((vFlags & FLAG_SEA) != 0u) {
+                // Three wave trains at different scales and bearings. Two is enough to see the
+                // pattern repeat once the horizon is a kilometre away; three is not.
+                float swell = sin(vWorld.x * 0.021 + uTime * 0.55)
+                            + sin(vWorld.z * 0.017 - uTime * 0.42)
+                            + 0.6 * sin((vWorld.x + vWorld.z) * 0.045 + uTime * 0.9);
+
+                vec3 deep    = vec3(0.04, 0.11, 0.20);
+                vec3 crest   = vec3(0.16, 0.38, 0.50);
+                albedo = mix(deep, crest, clamp(0.5 + 0.22 * swell, 0.0, 1.0));
+
+                // A specular streak where the sun would sit, which is most of what makes a flat
+                // plane read as water rather than as blue floor.
+                float glint = pow(clamp(0.5 + 0.5 * swell, 0.0, 1.0), 14.0);
+                albedo += vec3(0.55, 0.62, 0.60) * glint * (0.7 - 0.45 * uNight);
+
+                // Moonlight instead of sun after dark.
+                albedo *= 1.0 - 0.45 * uNight;
             }
 
             if ((vFlags & FLAG_POND) != 0u) {
