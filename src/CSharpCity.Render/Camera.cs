@@ -13,6 +13,19 @@ public sealed class Camera
     public bool Flying;
 
     /// <summary>
+    /// Walking only, with the controls of the Simulation Lab line view it is opened from: Shift
+    /// four times the pace, Alt a quarter of it, and no flying.
+    /// </summary>
+    /// <remarks>
+    /// A multiplier on the walk rather than the absolute sprint speed, because the point is that the
+    /// same keys feel the same in both applications. Fly is refused rather than allowed, since
+    /// someone who walked out of a factory door into the city came to walk it.
+    /// </remarks>
+    public bool Walkable;
+
+    public const float WalkableFast = 4f, WalkableSlow = 0.25f;
+
+    /// <summary>
     /// Cruising and sprint speeds, in metres per second, given as absolutes rather than as a base
     /// and a multiplier.
     /// </summary>
@@ -103,7 +116,7 @@ public sealed class Camera
     /// <summary>
     /// <paramref name="move"/> is in local axes: X = strafe right, Y = up (fly only), Z = forward.
     /// </summary>
-    public void Move(Vector3 move, float deltaTime, bool sprinting)
+    public void Move(Vector3 move, float deltaTime, bool sprinting, bool slow = false)
     {
         // Normalised across the ground only, so holding Space while flying forward climbs at the
         // full rate rather than trading half of it away for the forward motion. The two axes are
@@ -111,9 +124,11 @@ public sealed class Camera
         var ground = new Vector2(move.X, move.Z);
         if (ground.LengthSquared() > 1f) ground = Vector2.Normalize(ground);
 
-        float speed = (Flying
-            ? sprinting ? FlySprintSpeed : FlySpeed
-            : sprinting ? WalkSprintSpeed : WalkSpeed) * deltaTime;
+        float speed = (Walkable && !Flying
+            ? WalkSpeed * (sprinting ? WalkableFast : 1f) * (slow ? WalkableSlow : 1f)
+            : Flying
+                ? sprinting ? FlySprintSpeed : FlySpeed
+                : sprinting ? WalkSprintSpeed : WalkSpeed) * deltaTime;
 
         // Both modes keep WASD in the ground plane, so looking up never launches you and looking
         // down never drives you into the pavement. Flying used to follow the full look direction,
@@ -130,6 +145,8 @@ public sealed class Camera
 
     public void ToggleFly()
     {
+        if (Walkable && !Flying) return;
+
         Flying = !Flying;
         if (!Flying) Position.Y = EyeHeight;
     }

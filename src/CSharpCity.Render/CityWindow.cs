@@ -97,6 +97,9 @@ public sealed class CityWindow : IDisposable
     /// <summary>Set off the render thread by a finished fetch; drained at the top of the next frame.</summary>
     GitHubSnapshot? _pendingSnapshot;
 
+    /// <summary>Walking only, with Shift and Alt as multipliers: see <see cref="Camera.Walkable"/>.</summary>
+    public bool Walkable { get; init; }
+
     public CityWindow(SceneGraph scene, string title, WorksFeed? feed = null)
     {
         _scene = scene;
@@ -179,7 +182,7 @@ public sealed class CityWindow : IDisposable
         _text.Build(_scene.Labels);
         _hud = new HudRenderer(_gl, _atlas);
 
-        _camera = new Camera { Position = _scene.SpawnPosition, Yaw = _scene.SpawnYaw };
+        _camera = new Camera { Position = _scene.SpawnPosition, Yaw = _scene.SpawnYaw, Walkable = Walkable };
 
         _input = _window.CreateInput();
 
@@ -201,8 +204,11 @@ public sealed class CityWindow : IDisposable
 
         Console.WriteLine($"{_scene.Labels.Count} labels · {_scene.Roads.Count} roads · " +
                           $"{_scene.Paths.Count} routes · {_scene.Travellers.Count} travellers");
-        Console.WriteLine("WASD move · mouse look · Shift sprint · F fly · Tab day/night · " +
-                          "L labels · T traffic · M minimap · Esc release cursor");
+        Console.WriteLine(Walkable
+            ? "Walkable: WASD walk · mouse look · Shift faster · Alt slower · Tab day/night · " +
+              "Esc release cursor"
+            : "WASD move · mouse look · Shift sprint · F fly · Tab day/night · " +
+              "L labels · T traffic · M minimap · Esc release cursor");
         Console.WriteLine($"F1 shows the key legend. C flies you to the next of " +
                           $"{_scene.Interest.Count} incidents around the city.");
         Console.WriteLine($"R rides a car to a building of your choosing " +
@@ -902,7 +908,8 @@ public sealed class CityWindow : IDisposable
         AdvanceFlight(deltaTime);
         AdvanceRide(deltaTime);
         if (!_inFlight && !_riding)
-            _camera.Move(move, dt, Held(keyboard, Key.ShiftLeft, Key.ShiftRight));
+            _camera.Move(move, dt, Held(keyboard, Key.ShiftLeft, Key.ShiftRight),
+                Held(keyboard, Key.AltLeft, Key.AltRight));
         _captionSeconds += deltaTime;
 
         // Ease between day and night rather than snapping.

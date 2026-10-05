@@ -100,7 +100,10 @@ var feed = github.Available
         fresh => Overlay.Rebuild(scene, model, fresh))
     : null;
 
-using var window = new CityWindow(scene, $"CSharpCity â€” {model.SolutionName}", feed);
+using var window = new CityWindow(scene, $"CSharpCity â€” {model.SolutionName}", feed)
+{
+    Walkable = options.Walkable,
+};
 window.Run();
 return 0;
 
@@ -153,12 +156,12 @@ static void ReportGitHub(GitHubSnapshot github)
 /// <param name="GitHub">Same convention as <paramref name="Git"/>, for the remote.</param>
 sealed record CommandLineOptions(
     string? SolutionPath, string? DumpJson, string? FromJson, bool NoRender, bool Demo,
-    bool Analyzers, bool? Git, bool? GitHub, string? Coverage, bool SeparateCities)
+    bool Analyzers, bool? Git, bool? GitHub, string? Coverage, bool SeparateCities, bool Walkable)
 {
     public static CommandLineOptions? Parse(string[] args)
     {
         string? solution = null, dump = null, from = null, coverage = null;
-        bool noRender = false, demo = false, analyzers = false, cities = false;
+        bool noRender = false, demo = false, analyzers = false, cities = false, walkable = false;
         bool? git = null, github = null;
 
         for (int i = 0; i < args.Length; i++)
@@ -176,6 +179,7 @@ sealed record CommandLineOptions(
                 case "--no-github": github = false; break;
                 case "--coverage" when i + 1 < args.Length: coverage = args[++i]; break;
                 case "--cities": cities = true; break;
+                case "--walkable": walkable = true; break;
                 case "-h" or "--help": return null;
                 default:
                     if (args[i].StartsWith('-')) return null;
@@ -184,9 +188,12 @@ sealed record CommandLineOptions(
             }
         }
 
+        // Walking needs somewhere to walk: with nothing else asked for, the demo city.
+        if (walkable && solution is null && from is null) demo = true;
+
         if (solution is null && from is null && !demo) return null;
         return new CommandLineOptions(solution, dump, from, noRender, demo, analyzers, git, github,
-            coverage, cities);
+            coverage, cities, walkable);
     }
 
     public static void PrintUsage() => Console.WriteLine("""
@@ -212,6 +219,9 @@ sealed record CommandLineOptions(
                               with: dotnet test --collect:"XPlat Code Coverage"
           --cities            Lay each project out as its own town with open country between them,
                               rather than as districts of a single city.
+          --walkable          Walk only, no flying, with Shift four times the pace and Alt a
+                              quarter of it: the controls of Simulation Lab's line view, which
+                              opens the city this way. On its own, walks the demo city.
         """);
 }
 

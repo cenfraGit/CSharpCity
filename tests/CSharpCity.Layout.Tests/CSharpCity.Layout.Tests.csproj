@@ -22,6 +22,7 @@
     <ProjectReference Include="..\..\src\CSharpCity.Layout\CSharpCity.Layout.csproj" />
     <ProjectReference Include="..\..\src\CSharpCity.Model\CSharpCity.Model.csproj" />
     <ProjectReference Include="..\..\src\CSharpCity.Analysis\CSharpCity.Analysis.csproj" />
+    <ProjectReference Include="..\..\src\CSharpCity.Render\CSharpCity.Render.csproj" />
   </ItemGroup>
 
 </Project>
